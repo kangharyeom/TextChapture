@@ -4,7 +4,7 @@ import numpy as np
 from google.cloud import vision
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QTextEdit, QPushButton, QLineEdit, QScrollArea 
 from PySide6.QtCore import Qt, QPoint, QEvent
-from PySide6.QtGui import QPainter, QColor, QPixmap, QMouseEvent, QCursor, QKeySequence, QShortcut
+from PySide6.QtGui import QPainter, QColor, QPixmap, QMouseEvent, QCursor, QKeySequence, QShortcut, QGuiApplication
 
 class TransparentOverlay(QWidget):
     def __init__(self, parent=None):
@@ -39,16 +39,18 @@ class TransparentOverlay(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
-            if self.header.geometry().contains(event.position().toPoint()):
-                # 헤더를 클릭하면 드래그 시작
+            if self.header.geometry().contains(event.position().toPoint()):  # event.position() 대신 event.pos() 사용
                 self.dragging = True
-                self.offset = event.position().toPoint()
+                try:
+                    self.offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                except AttributeError:
+                    # 일부 PySide6 버전에서 .globalPosition()이 QPoint를 반환하는 경우를 대비
+                    self.offset = event.globalPos() - self.frameGeometry().topLeft()
             else:
-                # 테두리를 클릭하면 리사이징 시작
-                edge = self.get_resize_edge(event.position().toPoint())
-                if edge:
+                # 리사이징 시작
+                self.resize_edge = self.get_resize_edge(event.position().toPoint())
+                if self.resize_edge is not None:
                     self.resizing = True
-                    self.resize_edge = edge
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self.dragging:
@@ -137,7 +139,7 @@ class OCRMainWindow(QMainWindow):
         self.overlay.show()
         self.client = None
 
-        
+        self.update_json_button.click() 
 
     def initUI(self):
         
@@ -150,31 +152,12 @@ class OCRMainWindow(QMainWindow):
         layout = QVBoxLayout(central_widget)
 
         # JSON 키 파일 경로 입력 필드
-        # C:\\Users\\PC\\IdeaProjects\\OcrTool-main\\rpaocr-424514-0c8463d64a82.json
         self.json_path_input = QLineEdit(self)
-        self.json_path_input.setPlaceholderText("JSON 키 파일 경로를 입력하세요 => ex) C:/Users/dhk93/OneDrive/Desktop/key/rpaacr-424a14-e50490e653c4.json")
-        
-        # 기본 경로 설정
-        default_path = r"C:\\Users\\PC\\IdeaProjects\\OcrTool-main\\rpaocr-424514-0c8463d64a82.json"
-        self.json_path_input.setText(default_path)
-
-        layout.addWidget(self.json_path_input)
 
         # JSON 경로 업데이트 버튼
-        self.update_json_button = QPushButton("JSON 경로 업데이트", self)
+        self.update_json_button = QPushButton(self)
         self.update_json_button.clicked.connect(self.update_json_path)
-        layout.addWidget(self.update_json_button)
-
-        # JSON 키 발급 방법 토글 버튼
-        self.show_instruction_button = QPushButton("JSON 키 발급 방법 보기", self)
-        self.show_instruction_button.clicked.connect(self.toggle_instruction)
-        layout.addWidget(self.show_instruction_button)
-
-        # JSON 키 발급 방법 설명 라벨 (처음에는 숨김)
-        self.instruction_label = QLabel()
-        self.instruction_label.setWordWrap(True)
-        self.instruction_label.hide()
-        layout.addWidget(self.instruction_label)
+        # layout.addWidget(self.update_json_button) 
 
         # 스크롤 가능한 영역 생성
         scroll_area = QScrollArea()
@@ -200,7 +183,7 @@ class OCRMainWindow(QMainWindow):
         self.capture_button.clicked.connect(self.captureAndOCR)
         layout.addWidget(self.capture_button)
 
-        shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
+        shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
         shortcut.activated.connect(self.captureAndOCR)
 
         self.setLayout(layout)
@@ -212,8 +195,8 @@ class OCRMainWindow(QMainWindow):
     def eventFilter(self, source, event):
         # 키 이벤트 감지
         if event.type() == QEvent.KeyPress:
-            # Ctrl + Shift + C 조합 감지
-            if (event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier | Qt.ShiftModifier):
+            # Ctrl + C 조합 감지
+            if (event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier):
                 self.captureAndOCR()  # 캡처 함수를 호출합니다.
                 return True
         return super().eventFilter(source, event)
@@ -225,7 +208,7 @@ class OCRMainWindow(QMainWindow):
 
     def update_json_path(self):
         # JSON 키 파일 경로 업데이트 및 클라이언트 초기화
-        json_path = self.json_path_input.text()
+        json_path = r"C:\\Users\\PC\\IdeaProjects\\OcrTool-main\\rpaocr-424514-0c8463d64a82.json"
         try:
             self.client = vision.ImageAnnotatorClient.from_service_account_json(json_path)
             self.text_edit.setText("JSON 경로가 성공적으로 업데이트되었습니다.")
@@ -261,37 +244,62 @@ class OCRMainWindow(QMainWindow):
             self.text_edit.setText("먼저 JSON 키 파일 경로를 설정해 주세요.")
             return
 
-        # 화면 캡처
-        screen = QApplication.primaryScreen()
-        screenshot = screen.grabWindow(0, self.overlay.x(), self.overlay.y(), 
-                                       self.overlay.width(), self.overlay.height())
+        # overlay의 화면 절대 좌표 가져오기
+        overlay_pos = self.overlay.mapToGlobal(self.overlay.rect().topLeft())
         
-        # 캡처한 이미지 표시
-        self.ocr_label.setPixmap(screenshot.scaled(400, 400, Qt.KeepAspectRatio))
+        # 오버레이가 위치한 화면을 찾기
+        target_screen = None
+        for screen in QGuiApplication.screens():
+            geometry = screen.geometry()
+            if geometry.contains(overlay_pos):
+                target_screen = screen
+                break
 
-        # 캡처한 이미지를 numpy 배열로 변환
-        qimage = screenshot.toImage()
-        width = qimage.width()
-        height = qimage.height()
-        ptr = qimage.constBits()
-        arr = np.array(ptr).reshape(height, width, 4)
-        img = arr[:, :, :3]
+        # 화면을 찾은 경우 해당 화면에서 캡처
+        if target_screen:
+            screenshot = target_screen.grabWindow(
+                0,
+                overlay_pos.x() - target_screen.geometry().x(),
+                overlay_pos.y() - target_screen.geometry().y(),
+                self.overlay.width(),
+                self.overlay.height()
+            )
 
-        # 이미지 색상 변환 및 인코딩
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        _, encoded_img = cv2.imencode('.png', img)
-        content = encoded_img.tobytes()
+            # 캡처한 이미지 표시
+            self.ocr_label.setPixmap(screenshot.scaled(400, 400, Qt.KeepAspectRatio))
 
-        # Google Cloud Vision API를 사용하여 OCR 수행
-        image = vision.Image(content=content)
-        response = self.client.text_detection(image=image)
-        texts = response.text_annotations
+            # 캡처한 이미지를 numpy 배열로 변환
+            qimage = screenshot.toImage()
+            width = qimage.width()
+            height = qimage.height()
+            ptr = qimage.constBits()
+            arr = np.array(ptr).reshape(height, width, 4)
+            img = arr[:, :, :3]
 
-        # OCR 결과 표시
-        if texts:
-            self.text_edit.setText(texts[0].description)
+            # 이미지 색상 변환 및 인코딩
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            _, encoded_img = cv2.imencode('.png', img)
+            content = encoded_img.tobytes()
+
+            # Google Cloud Vision API를 사용하여 OCR 수행
+            image = vision.Image(content=content)
+            response = self.client.text_detection(image=image)
+            texts = response.text_annotations
+
+            # OCR 결과 표시
+            if texts:
+                result_text = texts[0].description
+                self.text_edit.setText(result_text)
+
+                # 결과 텍스트를 클립보드에 복사
+                clipboard = QApplication.clipboard()
+                clipboard.setText(result_text)
+
+            else:
+                self.text_edit.setText("텍스트가 감지되지 않았습니다.")
         else:
-            self.text_edit.setText("텍스트가 감지되지 않았습니다.")
+            self.text_edit.setText("오버레이가 표시된 화면을 찾을 수 없습니다.")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
